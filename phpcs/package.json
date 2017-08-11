@@ -23,7 +23,7 @@
 		"Linters"
 	],
 	"engines": {
-		"vscode": "^1.4.0"
+		"vscode": "^1.8.0"
 	},
 	"activationEvents": [
 		"onLanguage:php"
@@ -47,13 +47,29 @@
 					"default": null,
 					"description": "Optional. The name or path of the coding standard to use. Defaults to the one set in phpcs global config."
 				},
-				"phpcs.ignore": {
+				"phpcs.ignorePatterns": {
 					"type": [
-						"string",
+						"array",
 						"null"
 					],
 					"default": null,
-					"description": "Optional. A comma separated list of patterns to ignore files and directories."
+					"description": "Optional. An array of glob patterns to ignore files and directories."
+				},
+				"phpcs.errorSeverity": {
+					"type": [
+						"number",
+						"null"
+					],
+					"default": null,
+					"description": "Optional. Control the error severity level."
+				},
+				"phpcs.warningSeverity": {
+					"type": [
+						"number",
+						"null"
+					],
+					"default": null,
+					"description": "Optional. Control the warning severity level."
 				}
 			}
 		}
@@ -67,10 +83,10 @@
 	"devDependencies": {
 		"@types/mocha": "^2.2.33",
 		"@types/node": "^6.0.52",
-		"typescript": "^2.1.4",
+		"typescript": "^2.1.5",
 		"vscode": "^1.0.3"
 	},
-		"dependencies": {
-		"vscode-languageclient": "^2.6.3"
+	"dependencies": {
+		"vscode-languageclient": "^3.0.3"
 	}
 }

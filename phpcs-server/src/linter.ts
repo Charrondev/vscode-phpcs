@@ -8,6 +8,7 @@ import {
 	TextDocument, Diagnostic, DiagnosticSeverity, Files
 } from "vscode-languageserver";
 
+import minimatch = require("minimatch");
 import cp = require("child_process");
 import path = require("path");
 import fs = require("fs");
@@ -43,7 +44,15 @@ interface PhpcsReportMessage {
 export interface PhpcsSettings {
 	enable: boolean;
 	standard: string;
-	ignore: string;
+	ignorePatterns?: string[];
+	warningSeverity?: number;
+	errorSeverity?: number;
+}
+
+export interface PhpcsVersion {
+	major: number;
+	minor: number;
+	patch: number;
 }
 
 export class PhpcsPathResolver {
@@ -143,13 +152,18 @@ export class PhpcsPathResolver {
 
 		let pathSeparator = /^win/.test(process.platform) ? ";" : ":";
 		let globalPaths = process.env.PATH.split(pathSeparator);
-		globalPaths.forEach(globalPath => {
+		globalPaths.every(globalPath => {
 			let testPath = path.join( globalPath, this.phpcsExecutable );
 			if (fs.existsSync(testPath)) {
 				this.phpcsPath = testPath;
 				return false;
 			}
+			return true;
 		});
+		
+		if (this.phpcsPath !== this.phpcsExecutable) {
+			return this.phpcsPath;
+		}
 
 		if (this.rootPath) {
 			// Determine whether composer.json exists in our workspace root.
@@ -220,7 +234,7 @@ function makeDiagnostic(document: TextDocument, message: PhpcsReportMessage): Di
 	};
 
 	// Process diagnostic severity.
-	let severity = DiagnosticSeverity.Error;
+	let severity: DiagnosticSeverity = DiagnosticSeverity.Error;
 	if (message.type === "WARNING") {
 		severity = DiagnosticSeverity.Warning;
 	}
@@ -230,10 +244,12 @@ function makeDiagnostic(document: TextDocument, message: PhpcsReportMessage): Di
 
 export class PhpcsLinter {
 
-	private phpcsPath: string;
+	private path: string;
+	private version: PhpcsVersion;
 
-	constructor(phpcsPath: string) {
-		this.phpcsPath = phpcsPath;
+	private constructor(path: string, version: PhpcsVersion) {
+		this.path = path;
+		this.version = version;
 	}
 
 	/**
@@ -257,7 +273,17 @@ export class PhpcsLinter {
 						reject("phpcs: Unable to locate phpcs. Please add phpcs to your global path or use composer depency manager to install it in your project locally.");
 					}
 
-					resolve(new PhpcsLinter(phpcsPath));
+					let versionPattern: RegExp = /^PHP_CodeSniffer version (\d+)\.(\d+)\.(\d+)/i;
+					let versionMatches = stdout.match(versionPattern);
+
+					let version: PhpcsVersion = { major: 0, minor: 0, patch: 0 };
+					if (versionMatches !== null) {
+						version.major = Number.parseInt(versionMatches[1], 10);
+						version.minor = Number.parseInt(versionMatches[2], 10);
+						version.patch = Number.parseInt(versionMatches[3], 10);
+					}
+
+					resolve(new PhpcsLinter(phpcsPath, version));
 				});
 			} catch(e) {
 				reject(e);
@@ -266,35 +292,75 @@ export class PhpcsLinter {
 	}
 
 	public lint(document: TextDocument, settings: PhpcsSettings, rootPath?: string): Thenable<Diagnostic[]> {
-
-		// Process linting paths.
-		let filePath = Files.uriToFilePath(document.uri);
-		let lintPath = this.phpcsPath;
-
-		// Make sure we escape spaces in paths on Windows.
-		if ( /^win/.test(process.platform) ) {
-			filePath = `"${filePath}"`;
-		 	lintPath = `"${lintPath}"`;
-		}
-
-		// Process linting arguments.
-		let lintArgs = [ "--report=json" ];
-		if (settings.standard) {
-			lintArgs.push(`--standard=${settings.standard}`);
-		}
-		if (settings.ignore) {
-			lintArgs.push(`--ignore=${settings.ignore}`);
-		}
-		lintArgs.push( filePath );
-
 		return new Promise<Diagnostic[]>((resolve, reject) => {
+
+			// Process linting paths.
+			let filePath = Files.uriToFilePath(document.uri);
+			let fileText = document.getText();
+			let executablePath = this.path;
+
+			// Return empty on empty text.
+			if (fileText === '') {
+				return resolve([]);
+			}
+
+			// Process linting arguments.
+			let lintArgs = [ '--report=json' ];
+
+			// -q (quiet) option is available since phpcs 2.6.2
+			if (this.version.major > 2
+			|| (this.version.major === 2 && this.version.minor > 6)
+			|| (this.version.major === 2 && this.version.minor === 6 && this.version.patch >= 2)
+			) {
+				lintArgs.push('-q');
+			}
+
+			// --encoding option is available since 1.3.0
+			if (this.version.major > 1
+			|| (this.version.major === 1 && this.version.minor >= 3)
+			) {
+				lintArgs.push('--encoding=UTF-8');
+			}
+
+			if (settings.standard !== undefined) {
+				lintArgs.push(`--standard=${settings.standard}`);
+			}
+
+			// Check if file should be ignored (Skip for in-memory documents)
+			if ( filePath !== undefined ) {
+				if (settings.ignorePatterns !== undefined && settings.ignorePatterns.length) {
+					if (this.version.major > 2) {
+						// PHPCS v3 and up support this with STDIN files
+						lintArgs.push(`--ignore=${settings.ignorePatterns.join(',')}`);
+					} else if (settings.ignorePatterns.some(pattern => minimatch(filePath, pattern))) {
+						// We must determine this ourself for lower versions
+						return resolve([]);
+					}
+				}
+			}
+
+			if (settings.errorSeverity !== undefined) {
+				lintArgs.push(`--error-severity=${settings.errorSeverity}`);
+			}
+			if (settings.warningSeverity !== undefined) {
+				lintArgs.push(`--warning-severity=${settings.warningSeverity}`);
+			}
+
+			// Make sure we escape spaces in paths on Windows.
+			if ( /^win/.test(process.platform) ) {
+				if (/\s/g.test(filePath)) {
+					filePath = `"${filePath}"`;
+				}
+				if (/\s/g.test(executablePath)) {
+					executablePath = `"${executablePath}"`;
+				}
+			}
+
 			let command = null;
 			let args = null;
 			let phpcs = null;
 
 			let options = {
-				cwd: rootPath ? rootPath: path.dirname(filePath),
-				stdio: [ "ignore", "pipe", "pipe" ],
 				env: process.env,
 				encoding: "utf8",
 				timeout: 0,
@@ -305,10 +371,10 @@ export class PhpcsLinter {
 
 			if ( /^win/.test(process.platform) ) {
 				command = process.env.comspec || "cmd.exe";
-				args = ['/s', '/c', '"', lintPath].concat(lintArgs).concat('"');
+				args = ['/s', '/c', '"', executablePath].concat(lintArgs).concat('"');
 				phpcs = cp.execFile( command, args, options );
 			} else {
-				command = lintPath;
+				command = executablePath;
 				args = lintArgs;
 				phpcs = cp.spawn( command, args, options );
 			}
@@ -325,7 +391,7 @@ export class PhpcsLinter {
 
 			phpcs.on("close", (code: string) => {
 				try {
-					result = result.trim();
+					result = result.toString().trim();
 					let match = null;
 
 					// Determine whether we have an error and report it otherwise send back the diagnostics.
@@ -344,19 +410,22 @@ export class PhpcsLinter {
 					}
 
 					let diagnostics: Diagnostic[] = [];
-					let report = JSON.parse(result);
-					for (var filename in report.files) {
-						let file: PhpcsReportFile = report.files[filename];
-						file.messages.forEach(message => {
-							diagnostics.push(makeDiagnostic(document, message));
-						});
-					}
+					let reportJson = JSON.parse(result);
+					let fileReport: PhpcsReportFile = reportJson.files.STDIN;
+
+					fileReport.messages.forEach((message) => {
+						diagnostics.push(makeDiagnostic(document, message));
+					});
+
 					resolve(diagnostics);
 				}
 				catch (e) {
 					reject(e);
 				}
 			});
+
+			phpcs.stdin.write( fileText );
+			phpcs.stdin.end();
 		});
 	}
 }
